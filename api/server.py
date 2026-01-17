@@ -12,11 +12,16 @@ import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from neo4j import GraphDatabase
+from cache import SimpleCache
 
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASS = os.getenv("NEO4J_PASS", "Athena2025")
 API_PORT = int(os.getenv("API_PORT", "8080"))
+CACHE_TTL = int(os.getenv("CACHE_TTL", "300"))  # 5 minutes default
+
+# Initialize cache
+cache = SimpleCache(default_ttl=CACHE_TTL)
 
 class Neo4jConnection:
     _driver = None
@@ -51,6 +56,9 @@ class AthenaAPIHandler(BaseHTTPRequestHandler):
             elif path == "/stats":
                 self._handle_stats()
 
+            elif path == "/cache/stats":
+                self._handle_cache_stats()
+
             elif path == "/molecule/search":
                 name = query.get("name", [""])[0]
                 self._search_molecule(name)
@@ -65,13 +73,19 @@ class AthenaAPIHandler(BaseHTTPRequestHandler):
 
             else:
                 self._send_json({"error": "Not found", "endpoints": [
-                    "/health", "/stats", "/molecule/{cid}",
+                    "/health", "/stats", "/cache/stats", "/molecule/{cid}",
                     "/molecule/search?name=aspirin", "/suggest?disorder=headache"
                 ]}, 404)
         except Exception as e:
             self._send_json({"error": str(e)}, 500)
 
     def _handle_stats(self):
+        # Try cache first
+        cached = cache.get("stats")
+        if cached:
+            self._send_json(cached)
+            return
+
         driver = Neo4jConnection.get_driver()
         with driver.session() as session:
             stats = session.run("""
@@ -81,15 +95,26 @@ class AthenaAPIHandler(BaseHTTPRequestHandler):
                 RETURN total_count, avg_weight
             """).single()
 
-            self._send_json({
+            result = {
                 "molecules": stats["total_count"],
                 "avg_molecular_weight": round(stats["avg_weight"], 2) if stats["avg_weight"] else 0,
                 "status": "operational"
-            })
+            }
+
+            # Cache for 5 minutes (stats don't change often)
+            cache.set("stats", result)
+            self._send_json(result)
 
     def _search_molecule(self, name):
         if not name:
             self._send_json({"error": "name parameter required"}, 400)
+            return
+
+        # Try cache first (key based on search term)
+        cache_key = f"search:{name.lower()}"
+        cached = cache.get(cache_key)
+        if cached:
+            self._send_json(cached)
             return
 
         driver = Neo4jConnection.get_driver()
@@ -101,13 +126,24 @@ class AthenaAPIHandler(BaseHTTPRequestHandler):
                 LIMIT 20
             """, name=name)
             molecules = [dict(record) for record in result]
-            self._send_json({"results": molecules, "count": len(molecules)})
+            response = {"results": molecules, "count": len(molecules)}
+
+            # Cache search results for 5 minutes
+            cache.set(cache_key, response)
+            self._send_json(response)
 
     def _get_molecule(self, cid):
         try:
             cid = int(cid)
         except ValueError:
             self._send_json({"error": "Invalid CID"}, 400)
+            return
+
+        # Try cache first
+        cache_key = f"molecule:{cid}"
+        cached = cache.get(cache_key)
+        if cached:
+            self._send_json(cached)
             return
 
         driver = Neo4jConnection.get_driver()
@@ -119,6 +155,8 @@ class AthenaAPIHandler(BaseHTTPRequestHandler):
             record = result.single()
             if record:
                 mol = dict(record["m"])
+                # Cache molecule data for 10 minutes (rarely changes)
+                cache.set(cache_key, mol, ttl=600)
                 self._send_json(mol)
             else:
                 self._send_json({"error": "Molecule not found"}, 404)
@@ -131,10 +169,20 @@ class AthenaAPIHandler(BaseHTTPRequestHandler):
             "disclaimer": "Research tool only, not medical advice"
         })
 
+    def _handle_cache_stats(self):
+        """Return cache performance statistics"""
+        stats = cache.get_stats()
+        self._send_json({
+            "cache": stats,
+            "cache_enabled": True,
+            "default_ttl": CACHE_TTL
+        })
+
 def run_server():
     server = HTTPServer(("0.0.0.0", API_PORT), AthenaAPIHandler)
     print(f"Athena API running on port {API_PORT}")
-    print("Endpoints: /health /stats /molecule/{cid} /molecule/search?name=X /suggest?disorder=X")
+    print(f"Cache enabled: TTL={CACHE_TTL}s")
+    print("Endpoints: /health /stats /cache/stats /molecule/{cid} /molecule/search?name=X /suggest?disorder=X")
     server.serve_forever()
 
 if __name__ == "__main__":
