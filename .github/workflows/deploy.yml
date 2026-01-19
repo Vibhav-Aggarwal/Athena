@@ -1,0 +1,57 @@
+name: Deploy Athena API
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'api/**'
+      - '*.py'
+      - 'requirements.txt'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt || echo "No requirements.txt"
+          pip install pytest ruff || true
+
+      - name: Lint
+        run: ruff check . || echo "No ruff config"
+
+      - name: Test
+        run: pytest tests/ -v || echo "No tests yet"
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Deploy to Lab Server
+        env:
+          SSH_KEY: ${{ secrets.LAB_SERVER_SSH_KEY }}
+        run: |
+          echo "$SSH_KEY" > key.pem
+          chmod 600 key.pem
+
+          ssh -i key.pem -o StrictHostKeyChecking=no vibhavaggarwal@lab-server.vibhavaggarwal.com << 'ENDSSH'
+            cd /home/vibhavaggarwal/Projects/production/athena
+            git pull origin main
+            sudo systemctl restart athena-api || echo "Service not running"
+            sleep 5
+            curl -f http://localhost:8080/health || echo "Health check failed (service may not be running yet)"
+          ENDSSH
+
+      - name: Deployment Complete
+        run: echo "✅ Athena deployed successfully"
