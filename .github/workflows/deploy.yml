@@ -38,14 +38,26 @@ jobs:
     if: github.ref == 'refs/heads/main'
 
     steps:
-      - name: Deploy to Lab Server
+      - name: Install cloudflared
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+
+      - name: Setup SSH Key
         env:
           SSH_KEY: ${{ secrets.LAB_SERVER_SSH_KEY }}
         run: |
-          echo "$SSH_KEY" > key.pem
-          chmod 600 key.pem
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan lab-server.vibhavaggarwal.com >> ~/.ssh/known_hosts 2>/dev/null || true
 
-          ssh -i key.pem -o StrictHostKeyChecking=no vibhavaggarwal@lab-server.vibhavaggarwal.com << 'ENDSSH'
+      - name: Deploy to Lab Server
+        run: |
+          ssh -o ProxyCommand="cloudflared access ssh --hostname lab-server.vibhavaggarwal.com --service-token-id 55df69f3b2ea04e12c30498a120b050b.access --service-token-secret c363a2caa502d2e0bdaddc7ddc1c26c6003d33517fef2712209ccb8b369a4af7" \
+              -o StrictHostKeyChecking=no \
+              -i ~/.ssh/id_ed25519 \
+              vibhavaggarwal@lab-server.vibhavaggarwal.com << 'ENDSSH'
             cd /home/vibhavaggarwal/Projects/production/athena
             git pull origin main
             sudo systemctl restart athena-api || echo "Service not running"
